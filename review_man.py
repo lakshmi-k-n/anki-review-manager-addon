@@ -370,7 +370,7 @@ class ReviewSlideshow(QDialog):
 
         btn_layout = QHBoxLayout()
         self.approve_btn = QPushButton("Approve (Save, Unsuspend and Remove)")
-        self.reject_btn = QPushButton("Reject (Suspend, Remove)")
+        self.reject_btn = QPushButton("Reject (Suspend and Remove)")
         qconnect(self.approve_btn.clicked, self._approve)
         qconnect(self.reject_btn.clicked, self._reject)
         btn_layout.addWidget(self.approve_btn)
@@ -401,7 +401,7 @@ class ReviewSlideshow(QDialog):
 
     def _show_card(self, index: int) -> None:
         if not self.notes:
-            showInfo("Review finished. All cards were approved or rejected.")
+            showInfo("Review finished.")
             self.close()
             return
 
