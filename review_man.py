@@ -11,7 +11,7 @@ from aqt.qt import (
     QListWidget, QListWidgetItem, QLabel, QAction,
     QComboBox, QScrollArea, Qt, QWidget,
     QDateEdit, QCheckBox, QDate, QColor, QBrush,
-    QMessageBox, QAbstractItemView,
+    QAbstractItemView,
 )
 from aqt.utils import showInfo, qconnect, tooltip
 from aqt.operations import QueryOp
@@ -55,7 +55,7 @@ def _card_status(card: Card) -> str:
         return "Relearning"
     if card.queue == 4:
         return "Preview"
-    return f"❔ Unknown ({card.queue})"
+    return f"Unknown ({card.queue})"
 
 
 def _card_added_ts(card: Card) -> float:
@@ -67,14 +67,12 @@ def _card_added_ts(card: Card) -> float:
 
 class BulkReviewDialog(QDialog):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
-        # Initializing Bulk Review Dialog object
         super().__init__(parent)
         self.setWindowTitle("Bulk Review Manager")
         self.resize(1000, 800)
 
         self.notes: List[Note] = []
         self.cards: List[Card] = []
-        # Builds the GUI, includes self.start_btn
         self._build_ui()
         self._load_decks()
         self.start_btn.setEnabled(False)
@@ -82,34 +80,23 @@ class BulkReviewDialog(QDialog):
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
         deck_layout = QHBoxLayout()
-        # Label Deck:
         deck_layout.addWidget(QLabel("Deck:"))
         self.deck_combo = QComboBox()
         self.deck_combo.setMinimumWidth(250)
         qconnect(self.deck_combo.currentIndexChanged, self._on_deck_changed)
-        # Add widget deck combo dropdown
         deck_layout.addWidget(self.deck_combo)
 
         deck_layout.addStretch()
         layout.addLayout(deck_layout)
-        # Horizontal placeholder for date filter - contains filter by
-        # date checkbox, date from, date to
+
         date_layout = QHBoxLayout()
-        # Checkbox for filtering by date
         self.date_filter_enabled = QCheckBox("Filter by date")
-        # qconnect according to Anki's documentation, it is a helper to work
-        # around type-checking issues when using signal.connect(func).
-        # Equivalent to self.date_filter_enabled.toggled.connect(
-        #     self._on_date_filter_toggled
-        # )
         qconnect(self.date_filter_enabled.toggled, self._on_date_filter_toggled)
         date_layout.addWidget(self.date_filter_enabled)
-        # Add widget for filtering date by added or last edited time
         date_layout.addWidget(QLabel("Field:"))
         self.date_field_combo = QComboBox()
         self.date_field_combo.addItems(["added", "edited"])
         date_layout.addWidget(self.date_field_combo)
-        # From date input
         date_layout.addWidget(QLabel("From:"))
         self.date_from = QDateEdit()
         self.date_from.setCalendarPopup(True)
@@ -117,7 +104,6 @@ class BulkReviewDialog(QDialog):
         self.date_from.setDisplayFormat("yyyy-MM-dd")
         date_layout.addWidget(self.date_from)
 
-        # To date input
         date_layout.addWidget(QLabel("To:"))
         self.date_to = QDateEdit()
         self.date_to.setCalendarPopup(True)
@@ -125,9 +111,9 @@ class BulkReviewDialog(QDialog):
         self.date_to.setDisplayFormat("yyyy-MM-dd")
         date_layout.addWidget(self.date_to)
         date_layout.addStretch()
-        # Adding the date filter placeholder box in the main layout
         layout.addLayout(date_layout)
         self._on_date_filter_toggled(False)
+
         status_layout = QHBoxLayout()
         status_layout.addWidget(QLabel("Status:"))
         self.status_filter_combo = QComboBox()
@@ -348,7 +334,7 @@ class ReviewSlideshow(QDialog):
         self.notes: List[Note] = notes
         self.cards: List[Card] = cards
         self.current_index: int = 0
-        self._dirty_indices: set = set()
+        self._processed: set = set()
 
         self._build_ui()
         self._show_card(0)
@@ -373,8 +359,8 @@ class ReviewSlideshow(QDialog):
         layout.addWidget(self.editor_container, stretch=1)
 
         nav_layout = QHBoxLayout()
-        self.prev_btn = QPushButton("← Previous")
-        self.next_btn = QPushButton("Next →")
+        self.prev_btn = QPushButton("Previous")
+        self.next_btn = QPushButton("Next")
         qconnect(self.prev_btn.clicked, self._go_prev)
         qconnect(self.next_btn.clicked, self._go_next)
         nav_layout.addWidget(self.prev_btn)
@@ -383,63 +369,49 @@ class ReviewSlideshow(QDialog):
         layout.addLayout(nav_layout)
 
         btn_layout = QHBoxLayout()
-        self.approve_btn = QPushButton("Approve (Save, Unsuspend & Next)")
-        self.reject_btn = QPushButton("Reject (Suspend, No Save & Next)")
+        self.approve_btn = QPushButton("Approve (Save, Unsuspend and Remove)")
+        self.reject_btn = QPushButton("Reject (Suspend, Remove)")
         qconnect(self.approve_btn.clicked, self._approve)
         qconnect(self.reject_btn.clicked, self._reject)
         btn_layout.addWidget(self.approve_btn)
         btn_layout.addWidget(self.reject_btn)
         layout.addLayout(btn_layout)
 
-    # ------------------------------------------------------------------
-    # Dirty check via JavaScript bridge 
-    # ------------------------------------------------------------------
-    def _has_unsaved_changes(self, callback: Callable[[bool], None]) -> None:
-        """Ask the editor webview whether there are pending changes."""
-        try:
-            # Try the new editor's global state accessor
-            js = """
-            (() => {
-                try {
-                    if (globalThis.anki && globalThis.anki.editor) {
-                        if (typeof globalThis.anki.editor.hasChanges === 'function')
-                            return globalThis.anki.editor.hasChanges();
-                    }
-                    if (globalThis.editor && typeof globalThis.editor.hasChanges === 'function')
-                        return globalThis.editor.hasChanges();
-                } catch(e) {}
-                return null;
-            })()
-            """
-            self.editor.web.evalWithCallback(js, lambda result: callback(result is True))
-        except Exception:
-            callback(False)
-
     def _update_labels(self) -> None:
         card: Card = self.cards[self.current_index]
         note: Note = self.notes[self.current_index]
         status: str = _card_status(card)
+        total = len(self.notes) + len(self._processed)
+        done = len(self._processed)
         self.progress_label.setText(
-            f"Card {self.current_index + 1} of {len(self.notes)}  —  Status: {status}"
+            f"Card {self.current_index + 1} of {len(self.notes)}  |  "
+            f"Processed {done} of {total}  |  Status: {status}"
         )
         added: str = _ts_to_str(_card_added_ts(card))
         edited: str = _ts_to_str(float(note.mod))
         self.meta_label.setText(f"Added: {added}    Last edited: {edited}")
 
+    def _update_nav_buttons(self) -> None:
+        if not self.notes:
+            self.prev_btn.setEnabled(False)
+            self.next_btn.setEnabled(False)
+            return
+        self.prev_btn.setEnabled(self.current_index > 0)
+        self.next_btn.setEnabled(self.current_index < len(self.notes) - 1)
+
     def _show_card(self, index: int) -> None:
-        if index >= len(self.notes):
-            # Only close when there are ZERO cards remaining
-            showInfo("All cards processed — review complete!")
+        if not self.notes:
+            showInfo("Review finished. All cards were approved or rejected.")
             self.close()
             return
 
+        index = max(0, min(index, len(self.notes) - 1))
         self.current_index = index
         note: Note = self.notes[index]
 
         self._update_labels()
         self.editor.set_note(note)
-
-        self.prev_btn.setEnabled(index > 0)
+        self._update_nav_buttons()
 
     def _save_current_note(
         self,
@@ -450,7 +422,6 @@ class ReviewSlideshow(QDialog):
 
         def after_save() -> None:
             mw.col.update_note(note)
-            self._dirty_indices.discard(idx)
             if on_done is not None:
                 on_done()
 
@@ -463,6 +434,9 @@ class ReviewSlideshow(QDialog):
         self._save_current_note(on_done=lambda: self._show_card(idx - 1))
 
     def _go_next(self) -> None:
+        if self.current_index >= len(self.notes) - 1:
+            tooltip("You are on the last card.")
+            return
         idx = self.current_index
         self._save_current_note(on_done=lambda: self._show_card(idx + 1))
 
@@ -473,60 +447,41 @@ class ReviewSlideshow(QDialog):
         def after_save() -> None:
             if card.queue == -1:
                 mw.col.sched.unsuspend_cards([card.id])
+            self._processed.add(card.id)
             self._remove_current()
 
         self._save_current_note(on_done=after_save)
 
     def _reject(self) -> None:
-        """Do NOT save; just suspend and remove from slideshow."""
         idx = self.current_index
         card: Card = self.cards[idx]
 
         if card.queue != -1:
             mw.col.sched.suspend_cards([card.id])
 
-        self._dirty_indices.discard(idx)
-        tooltip("Card rejected (edits discarded).")
+        self._processed.add(card.id)
+        tooltip("Card rejected. Edits discarded.")
         self._remove_current()
 
     def _remove_current(self) -> None:
         idx = self.current_index
         del self.notes[idx]
         del self.cards[idx]
-        self._dirty_indices.discard(idx)
 
         if not self.notes:
-            # ONLY close when zero cards remain
-            showInfo("All cards processed — review complete!")
+            showInfo("Review finished. All cards were approved or rejected.")
             self.close()
             return
 
-        # Stay at same index (or step back if we removed the last)
         new_index = min(idx, len(self.notes) - 1)
         self._show_card(new_index)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        # JS-based dirty check
-        def after_check(has_changes: bool) -> None:
-            if has_changes or self._dirty_indices:
-                reply = QMessageBox.question(
-                    self,
-                    "Unsaved Changes",
-                    "You have unsaved edits. Close anyway and discard changes?",
-                    QMessageBox.StandardButton.Discard
-                    | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Cancel,
-                )
-                if reply == QMessageBox.StandardButton.Cancel:
-                    event.ignore()
-                    return
-            try:
-                self.editor.cleanup()
-            except Exception:
-                pass
-            event.accept()
-
-        self._has_unsaved_changes(after_check)
+        try:
+            self.editor.cleanup()
+        except Exception:
+            pass
+        event.accept()
 
 
 def open_bulk_reviewer() -> None:
