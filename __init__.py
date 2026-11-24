@@ -24,6 +24,10 @@ from anki.collection import Collection
 _review_window: Optional["ReviewSlideshow"] = None
 _search_dialog: Optional["BulkReviewDialog"] = None
 
+# Hard cap on how many notes a single search will return.
+# TODO pagination: replace this cap with paged fetching in the results list.
+MAX_SEARCH_RESULTS = 500
+
 
 def _qdate_to_ts_start(qdate: QDate) -> float:
     py_date = qdate.toPyDate()
@@ -73,6 +77,9 @@ class BulkReviewDialog(QDialog):
 
         self.notes: List[Note] = []
         self.cards: List[Card] = []
+        # True when the search hit MAX_SEARCH_RESULTS and there were more matches.
+        self._results_truncated: bool = False
+
         self._build_ui()
         self._load_decks()
         self.start_btn.setEnabled(False)
@@ -146,6 +153,9 @@ class BulkReviewDialog(QDialog):
         )
         self.list_widget.setAlternatingRowColors(True)
         qconnect(self.list_widget.itemChanged, self._on_item_changed)
+        # TODO pagination: switch this to a QListView backed by a model with
+        # canFetchMore/fetchMore, or add a "Load more" button, so the list can
+        # grow past MAX_SEARCH_RESULTS without building every row up front.
         layout.addWidget(self.list_widget)
 
         self.start_btn = QPushButton("Start Review")
@@ -205,15 +215,19 @@ class BulkReviewDialog(QDialog):
         to_ts: float = _qdate_to_ts_end(self.date_to.date())
         status_choice: str = self.status_filter_combo.currentText()
 
-        def search_op(col: Collection) -> Sequence[NoteId]:
+        def search_op(col: Collection) -> tuple[List[NoteId], bool]:
             try:
                 note_ids = col.find_notes(query)
             except Exception:
-                return []
+                return [], False
 
             filtered: List[NoteId] = []
+            truncated = False
             for nid in note_ids:
-                if len(filtered) >= 500:
+                if len(filtered) >= MAX_SEARCH_RESULTS:
+                    # There is at least one more candidate, so the result set
+                    # is truncated. We stop scanning to keep this cheap.
+                    truncated = True
                     break
                 try:
                     note = col.get_note(NoteId(nid))
@@ -238,9 +252,11 @@ class BulkReviewDialog(QDialog):
 
                 filtered.append(NoteId(nid))
 
-            return filtered
+            return filtered, truncated
 
-        def on_success(note_ids: Sequence[NoteId]) -> None:
+        def on_success(result: tuple[List[NoteId], bool]) -> None:
+            note_ids, truncated = result
+            self._results_truncated = truncated
             self._populate_list(note_ids)
 
         QueryOp(
@@ -250,6 +266,9 @@ class BulkReviewDialog(QDialog):
         ).with_progress("Searching...").run_in_background()
 
     def _populate_list(self, note_ids: Sequence[NoteId]) -> None:
+        # TODO pagination: this loop builds every Note, Card and list item on
+        # the UI thread. Split it into pages (for example 50 rows at a time)
+        # and append rows as the user scrolls or clicks "Load more".
         self.list_widget.blockSignals(True)
         self.list_widget.clear()
         self.notes = []
@@ -284,8 +303,20 @@ class BulkReviewDialog(QDialog):
             self.list_widget.addItem(item)
 
         self.list_widget.blockSignals(False)
-        self.status_label.setText(f"Found {len(self.notes)} notes.")
-        self.start_btn.setEnabled(len(self.notes) > 0)
+
+        count = len(self.notes)
+        if count == 0:
+            self.status_label.setText("Found 0 notes.")
+        elif self._results_truncated:
+            self.status_label.setText(
+                f"Showing the first {count} matches. "
+                f"There are more results than this. "
+                f"Narrow your search to see the rest."
+            )
+        else:
+            self.status_label.setText(f"Found {count} notes.")
+
+        self.start_btn.setEnabled(count > 0)
 
     def _on_item_changed(self, _item: QListWidgetItem) -> None:
         selected: bool = False
@@ -331,6 +362,9 @@ class ReviewSlideshow(QDialog):
         self.resize(1000, 800)
         self.setMinimumSize(700, 500)
 
+        # TODO lazy loading: accept note ids here and fetch each note on demand
+        # in _show_card, keeping only a small window of notes and cards in
+        # memory. Right now every selected note and card is loaded up front.
         self.notes: List[Note] = notes
         self.cards: List[Card] = cards
         self.current_index: int = 0
@@ -370,7 +404,7 @@ class ReviewSlideshow(QDialog):
 
         btn_layout = QHBoxLayout()
         self.approve_btn = QPushButton("Approve (Save, Unsuspend and Remove)")
-        self.reject_btn = QPushButton("Reject (Suspend and Remove)")
+        self.reject_btn = QPushButton("Reject (Suspend, Discard and Remove)")
         qconnect(self.approve_btn.clicked, self._approve)
         qconnect(self.reject_btn.clicked, self._reject)
         btn_layout.addWidget(self.approve_btn)
@@ -401,10 +435,13 @@ class ReviewSlideshow(QDialog):
 
     def _show_card(self, index: int) -> None:
         if not self.notes:
-            showInfo("Review finished.")
+            showInfo("Review finished. All cards were approved or rejected.")
             self.close()
             return
 
+        # TODO lazy loading: fetch self.notes[index] and its card here instead
+        # of assuming they are already loaded, and evict notes that are far
+        # from the current index to keep memory bounded.
         index = max(0, min(index, len(self.notes) - 1))
         self.current_index = index
         note: Note = self.notes[index]
